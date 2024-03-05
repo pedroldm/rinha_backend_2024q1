@@ -10,60 +10,57 @@ client_router = APIRouter()
 
 @client_router.post('/{client_id}/transacoes')
 async def make_transaction(client_id: int, payload: TransactionPayload):
-    if len(payload['descricao']) > 10:
-        raise HTTPException(status_code=422, detail="Description too long")
+    if not 0 < len(payload['descricao']) <= 10:
+        raise HTTPException(status_code=422, detail="Malformatted description")
 
     async with SessionLocal() as session:
-        client = await session.get(Client, client_id)
-        if not client:
+        if not (client := await session.get(Client, client_id)):
             raise HTTPException(status_code=404, detail="Unregistered client")
-
+        
         match payload['tipo']:
             case 'c':
-                client.balance += payload['valor']
+                client.balance = int(client.balance) + payload['valor']
             case 'd':
-                if abs(client.balance - payload['valor']) >= client.limit:
+                if abs(client.balance - payload['valor']) > client.limit:
                     raise HTTPException(status_code=422, detail="Invalid operation")
-                client.balance -= payload['valor']
+                client.balance = int(client.balance) - payload['valor']
             case _:
                 raise HTTPException(status_code=422, detail="Unknown operation")
 
-        transaction = Transaction(
+        session.add(Transaction(
             client_id=client_id,
             value=payload['valor'],
             type=payload['tipo'],
             description=payload['descricao']
-        )
-        session.add(transaction)
+        ))
 
+        response = {"limite": client.limit, "saldo": client.balance}
         await session.commit()
+        return response
 
 @client_router.get('/{client_id}/extrato')
 async def get_client_extract(client_id: int):
     async with SessionLocal() as session:
-        client = await session.get(Client, client_id)
-        if not client:
+        if not (client := await session.get(Client, client_id)):
             raise HTTPException(status_code=404, detail="Unregistered client")
         
         stmt = select(Transaction).where(Transaction.client_id == client_id).order_by(Transaction.date.desc()).limit(10)
         result = await session.execute(stmt)
         transactions = result.scalars().all()
-        
-        transactions_data = [
-            {
-                "valor": t.value,
-                "tipo": t.type,
-                "descricao": t.description,
-                "realizada_em": t.date.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-            } 
-            for t in transactions
-        ]
 
         return {
             "saldo": {
-                "total": client.balance,
+                "total": int(client.balance),
                 "data_extrato": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
-                "limite": client.limit
+                "limite": int(client.limit)
             },
-            "ultimas_transacoes": transactions_data
+            "ultimas_transacoes": [
+                {
+                    "valor": t.value,
+                    "tipo": t.type,
+                    "descricao": t.description,
+                    "realizada_em": t.date.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+                } 
+                for t in transactions
+            ]
         }
